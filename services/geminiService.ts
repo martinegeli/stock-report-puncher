@@ -28,17 +28,39 @@ const fileToGenerativePart = async (file: File): Promise<{ inlineData: { data: s
   };
 };
 
-// New schema: each object is a line item, with period columns (e.g., '2022', 'Q1 2023')
+// Enhanced schema with more specific guidance for value extraction
 const TABLE_RESPONSE_SCHEMA = {
   type: Type.ARRAY,
   items: {
     type: Type.OBJECT,
     properties: {
-      lineItem: { type: Type.STRING, description: "The name of the financial line item (e.g., 'Revenue', 'Net Income', 'Total Assets')." },
-      // All other properties are dynamic period columns
+      lineItem: { 
+        type: Type.STRING, 
+        description: "The name of the financial line item (e.g., 'Revenue', 'Net Income', 'Total Assets', 'Cash and Cash Equivalents')." 
+      },
+      // Example period properties to guide the model
+      "2023": { 
+        type: Type.STRING, 
+        description: "The value for 2023 period (e.g., '$1,234,567', '($123,456)', '1,234,567')" 
+      },
+      "2022": { 
+        type: Type.STRING, 
+        description: "The value for 2022 period (e.g., '$1,000,000', '($100,000)', '1,000,000')" 
+      },
+      "Q1 2023": { 
+        type: Type.STRING, 
+        description: "The value for Q1 2023 period (e.g., '$300,000', '($25,000)', '300,000')" 
+      },
+      "Q2 2023": { 
+        type: Type.STRING, 
+        description: "The value for Q2 2023 period (e.g., '$350,000', '($30,000)', '350,000')" 
+      }
     },
     required: ["lineItem"],
-    additionalProperties: { type: Type.STRING },
+    additionalProperties: { 
+      type: Type.STRING,
+      description: "Additional period values (e.g., 'Q3 2023', 'Q4 2023', '2021', etc.) with their corresponding financial values"
+    },
   },
 };
 
@@ -47,13 +69,23 @@ const TABLE_RESPONSE_SCHEMA = {
  * @param files Array of PDF files
  * @param readmeDocContent Context from README Google Doc
  * @param existingSheet 2D array of existing sheet data
- * @returns Array of objects: { lineItem, period1: value, period2: value, ... }
+ * @returns Object with parsed data, raw output, and processing stats
  */
 export const extractFinancialDataFromPdf = async (
   files: File[],
   readmeDocContent: string,
   existingSheet: string[][]
-): Promise<any[]> => {
+): Promise<{
+  data: any[];
+  rawOutput: string;
+  stats: {
+    filesProcessed: number;
+    lineItemsFound: number;
+    periodsFound: number;
+    processingTime: number;
+  };
+}> => {
+  const startTime = Date.now();
   // Convert all files to generative parts
   const pdfParts = await Promise.all(files.map(fileToGenerativePart));
 
@@ -64,15 +96,55 @@ export const extractFinancialDataFromPdf = async (
     const sep = '| ' + existingSheet[0].map(() => '---').join(' | ') + ' |\n';
     const rows = existingSheet.slice(1).map(row => '| ' + row.join(' | ') + ' |').join('\n');
     existingSheetTable = header + sep + rows;
+    console.log("Existing sheet data for context:", existingSheetTable);
+  } else {
+    console.log("No existing sheet data found");
+  }
+  
+  console.log("README content length:", readmeDocContent.length);
+  if (readmeDocContent.length > 0) {
+    console.log("README preview:", readmeDocContent.substring(0, 200) + "...");
   }
 
-  const systemInstruction = `${readmeDocContent}\n\nYou are an automated financial data extraction service. Your only function is to analyze multiple financial documents and extract tabular data into a structured JSON table format. Each object in the array should have a 'lineItem' property and one property for each period (e.g., '2022', '2023', 'Q1 2023'). Do not add, omit, or interpret any information. Only add new data that is not already present in the provided sheet. Preserve all formatting (currency symbols, commas, parentheses for negatives).`;
+  const systemInstruction = `${readmeDocContent}\n\nYou are an expert financial data extraction service. Your task is to analyze financial documents and extract ALL numerical values associated with each line item. You MUST include the actual financial values (numbers, currency symbols, parentheses for negatives) for each period. Do not return empty or null values - if you cannot find a value for a period, omit that period entirely. Preserve exact formatting including currency symbols ($), commas, and parentheses for negative values.`;
 
-  const prompt = `Please analyze the provided financial statement PDFs and extract all line items with their corresponding values and periods from any financial tables (like Income Statements, Balance Sheets, or Cash Flow Statements). Structure the output as a JSON array, where each object represents a line item and each property after 'lineItem' is a period (e.g., '2022', '2023', 'Q1 2023').\n\nIf quarterly data is present, use period names like 'Q1 2023', 'Q2 2023', etc.\n\nHere is the current sheet data for context (do not duplicate existing data):\n${existingSheetTable}`;
+  const prompt = `Analyze the provided financial statement PDFs and extract ALL line items with their corresponding numerical values and periods from any financial tables (Income Statements, Balance Sheets, Cash Flow Statements, etc.).
+
+CRITICAL REQUIREMENTS:
+1. Extract the ACTUAL numerical values for each line item and period
+2. Preserve exact formatting (currency symbols, commas, parentheses for negatives)
+3. If quarterly data is present, use period names like 'Q1 2023', 'Q2 2023', etc.
+4. If annual data is present, use year names like '2023', '2022', etc.
+5. Do NOT return empty or null values - only include periods where you find actual data
+6. Look for tables, charts, and any structured financial data
+
+Example expected output format:
+[
+  {
+    "lineItem": "Revenue",
+    "2023": "$1,234,567",
+    "2022": "$1,000,000",
+    "Q1 2023": "$300,000"
+  },
+  {
+    "lineItem": "Net Income",
+    "2023": "($123,456)",
+    "2022": "$50,000",
+    "Q1 2023": "($25,000)"
+  }
+]
+
+Current sheet data for context (do not duplicate existing data):
+${existingSheetTable}
+
+Extract ALL financial data you can find, ensuring each line item has at least one period with a value.`;
 
   try {
+    console.log(`Processing ${files.length} files with Gemini...`);
+    console.log(`Files:`, files.map(f => ({ name: f.name, size: f.size, type: f.type })));
+    
     const response = await ai.models.generateContent({
-      model: "gemini-2.5-flash",
+      model: "gemini-2.5-flash", // Reverting to flash model which might be more reliable for this task
       contents: {
         parts: [
           { text: prompt },
@@ -90,17 +162,59 @@ export const extractFinancialDataFromPdf = async (
       throw new Error("The model returned an empty response. The document might be unreadable or contain no financial tables.");
     }
     const jsonText = response.text.trim();
+    console.log("Raw Gemini response:", jsonText);
+    
     if (!jsonText) {
       throw new Error("The model returned an empty response. The document might be unreadable or contain no financial tables.");
     }
 
     const parsedData = JSON.parse(jsonText);
+    console.log("Parsed data:", parsedData);
 
     if (!Array.isArray(parsedData)) {
       throw new Error("The model did not return the data in the expected array format.");
     }
 
-    return parsedData;
+    // Validate that we have actual values, not just line items
+    const hasValues = parsedData.some(item => {
+      const keys = Object.keys(item);
+      return keys.length > 1 && keys.some(key => key !== 'lineItem' && item[key] && item[key].trim() !== '');
+    });
+
+    if (!hasValues) {
+      console.warn("Warning: Gemini returned line items but no values. This might indicate:");
+      console.warn("1. The PDFs don't contain extractable financial data");
+      console.warn("2. The model needs more context or better prompting");
+      console.warn("3. The PDFs might be image-based and need OCR");
+      console.warn("4. The financial data might be in charts rather than tables");
+      console.warn("Raw response for debugging:", jsonText);
+    } else {
+      console.log("✅ Successfully extracted financial data with values");
+    }
+
+    // Calculate processing statistics
+    const processingTime = Date.now() - startTime;
+    const lineItemsFound = parsedData.length;
+    const periodSet = new Set<string>();
+    parsedData.forEach(item => {
+      Object.keys(item).forEach(key => {
+        if (key !== 'lineItem' && item[key] && item[key].trim() !== '') {
+          periodSet.add(key);
+        }
+      });
+    });
+    const periodsFound = periodSet.size;
+
+    return {
+      data: parsedData,
+      rawOutput: jsonText,
+      stats: {
+        filesProcessed: files.length,
+        lineItemsFound,
+        periodsFound,
+        processingTime
+      }
+    };
 
   } catch (error) {
     console.error("Error calling Gemini API:", error);

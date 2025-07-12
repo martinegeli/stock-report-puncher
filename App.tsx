@@ -29,6 +29,13 @@ const App: React.FC = () => {
   const [isFoldersLoading, setIsFoldersLoading] = useState(false);
   const [files, setFiles] = useState<File[]>([]);
   const [extractedData, setExtractedData] = useState<FinancialDataItem[]>([]);
+  const [rawGeminiOutput, setRawGeminiOutput] = useState<string>('');
+  const [processingStats, setProcessingStats] = useState<{
+    filesProcessed: number;
+    lineItemsFound: number;
+    periodsFound: number;
+    processingTime: number;
+  } | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [isSaving, setIsSaving] = useState(false);
   const [isSaveSuccess, setIsSaveSuccess] = useState(false);
@@ -112,6 +119,8 @@ const App: React.FC = () => {
     setView(AppView.PROCESSING);
     resetError();
     setExtractedData([]);
+    setRawGeminiOutput('');
+    setProcessingStats(null);
 
     try {
       // Fetch README Google Doc content for context
@@ -119,8 +128,10 @@ const App: React.FC = () => {
       // Fetch existing sheet data for context
       const existingSheet = selectedStock.sheetId ? await getSheetData(selectedStock.sheetId) : [];
       // Call Gemini with all context
-      const data = await extractFinancialDataFromPdf(files, readmeDocContent, existingSheet);
-      setExtractedData(data);
+      const result = await extractFinancialDataFromPdf(files, readmeDocContent, existingSheet);
+      setExtractedData(result.data);
+      setRawGeminiOutput(result.rawOutput);
+      setProcessingStats(result.stats);
       setView(AppView.SUCCESS);
     } catch (err) {
       const errorMessage = err instanceof Error ? err.message : 'An unknown error occurred.';
@@ -191,6 +202,8 @@ const App: React.FC = () => {
     setSelectedStock(null);
     setFiles([]);
     setExtractedData([]);
+    setRawGeminiOutput('');
+    setProcessingStats(null);
     setError(null);
     setIsSaveSuccess(false);
   };
@@ -199,6 +212,8 @@ const App: React.FC = () => {
      setView(AppView.UPLOADING);
      setFiles([]);
      setExtractedData([]);
+     setRawGeminiOutput('');
+     setProcessingStats(null);
      setError(null);
      setIsSaveSuccess(false);
   };
@@ -296,6 +311,8 @@ const App: React.FC = () => {
         return (
           <DataTable
             data={extractedData}
+            rawGeminiOutput={rawGeminiOutput}
+            processingStats={processingStats}
             onReset={handleStartOver}
             onAppend={handleAppendData}
             isSaving={isSaving}
@@ -328,17 +345,17 @@ const App: React.FC = () => {
   };
 
   return (
-    <div className="min-h-screen bg-slate-50 flex flex-col p-4 sm:p-6 lg:p-8">
+    <div className="min-h-screen bg-gray-900 flex flex-col p-4 sm:p-6 lg:p-8">
       <header className="text-center mb-10">
-        <h1 className="text-4xl font-bold text-slate-800">Financial Data Puncher</h1>
-        <p className="mt-2 text-lg text-slate-600">Your personal AI assistant for organizing financial statements in Google Drive.</p>
+        <h1 className="text-4xl font-bold text-gray-100">Financial Data Puncher</h1>
+        <p className="mt-2 text-lg text-gray-300">Your personal AI assistant for organizing financial statements in Google Drive.</p>
       </header>
       <main className="flex-grow flex items-center justify-center">
         <div className="w-full max-w-4xl">
           {renderContent()}
         </div>
       </main>
-      <footer className="text-center mt-10 text-sm text-slate-500">
+      <footer className="text-center mt-10 text-sm text-gray-400">
         <p>Built with React, Gemini, and Google Drive.</p>
       </footer>
     </div>
