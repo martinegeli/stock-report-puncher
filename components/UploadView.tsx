@@ -102,9 +102,9 @@ function UploadView({ stock, files, onFileChange, onProcess, onBack }: UploadVie
                         </button>
                     </div>
                 </div>
-            )}
-            {error && <p className="mt-4 text-sm text-red-600 text-center">{error}</p>}
+            }
         </div>
+        {error && <p className="mt-4 text-sm text-red-600 text-center">{error}</p>}
     </div>
   );
 }
