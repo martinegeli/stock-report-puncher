@@ -1,0 +1,6 @@
+{
+  "name": "Financial Data Puncher",
+  "description": "An AI-powered tool to extract financial data from PDFs and organize it into stock-specific folders in your Google Drive. Each statement is saved as a Google Sheet.",
+  "requestFramePermissions": [],
+  "prompt": ""
+}
