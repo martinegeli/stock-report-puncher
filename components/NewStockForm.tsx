@@ -39,7 +39,7 @@ const NewStockForm: React.FC<NewStockFormProps> = ({ onSubmit, onBack, isLoading
             type="text"
             value={ticker}
             onChange={(e) => setTicker(e.target.value)}
-            className="w-full flex-grow px-3 py-2 bg-white border border-slate-300 rounded-md shadow-sm focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm"
+            className="w-full flex-grow px-3 py-2 bg-white text-gray-900 border border-slate-300 rounded-md shadow-sm focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm"
             placeholder="Enter Ticker Symbol"
             aria-label="Stock Ticker Symbol"
             required

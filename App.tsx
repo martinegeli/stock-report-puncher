@@ -3,13 +3,14 @@ import React, { useState, useCallback, useEffect } from 'react';
 import { FinancialDataItem, AppView, GoogleAuthStatus, StockFolder } from './types';
 import { useGoogleApiLoader } from './hooks/useGoogleApiLoader';
 import { extractFinancialDataFromPdf } from './services/geminiService';
-import { getReadmeDocContent, getSheetData } from './services/googleService';
+import { getSheetData } from './services/googleService';
 import { 
   initGoogleClient, 
   handleSignIn, 
   listStockFolders, 
   createStockFolder,
-  appendToSheet
+  appendToSheet,
+  updateSheetCells
 } from './services/googleService';
 import { ResetIcon } from './components/Icons';
 import Loader from './components/Loader';
@@ -123,12 +124,15 @@ const App: React.FC = () => {
     setProcessingStats(null);
 
     try {
-      // Fetch README Google Doc content for context
-      const readmeDocContent = await getReadmeDocContent();
       // Fetch existing sheet data for context
       const existingSheet = selectedStock.sheetId ? await getSheetData(selectedStock.sheetId) : [];
-      // Call Gemini with all context
-      const result = await extractFinancialDataFromPdf(files, readmeDocContent, existingSheet);
+      
+      // Determine operation type based on whether there's existing data
+      const operationType = existingSheet.length > 1 ? 'update' : 'create';
+      console.log(`Operation type: ${operationType} (existing sheet rows: ${existingSheet.length})`);
+      
+      // Call Gemini with context
+      const result = await extractFinancialDataFromPdf(files, existingSheet, operationType);
       setExtractedData(result.data);
       setRawGeminiOutput(result.rawOutput);
       setProcessingStats(result.stats);
@@ -150,50 +154,113 @@ const App: React.FC = () => {
     try {
       // Read the current sheet data again to avoid race conditions
       const currentSheet = await getSheetData(selectedStock.sheetId);
-      // Build a set of existing periods and lineItems
-      const existingPeriods = currentSheet[0]?.slice(1) || [];
-      const existingLineItems = new Set(currentSheet.slice(1).map(row => row[0]));
-      // Prepare new rows for only new data
-      const newRows: string[][] = [];
-      for (const item of extractedData) {
-        const { lineItem, ...periods } = item;
-        // If the lineItem is new, add the whole row
-        if (!existingLineItems.has(lineItem)) {
-          const row = [lineItem, ...existingPeriods.map(p => periods[p] || '')];
-          // Add any new periods not in existingPeriods
-          for (const period of Object.keys(periods)) {
-            if (!existingPeriods.includes(period)) {
-              row.push(periods[period]);
-            }
-          }
-          newRows.push(row);
-        } else {
-          // If the lineItem exists, only add new periods
-          const rowIdx = currentSheet.findIndex(row => row[0] === lineItem);
-          if (rowIdx !== -1) {
-            for (const period of Object.keys(periods)) {
-              if (!existingPeriods.includes(period)) {
-                // Add a new value for this period
-                const row = Array(currentSheet[0].length).fill('');
-                row[0] = lineItem;
-                row[currentSheet[0].length] = periods[period];
-                newRows.push(row);
-              }
-            }
-          }
-        }
+      
+      // Determine if this is a create or update operation
+      const isUpdate = currentSheet.length > 1;
+      
+      if (isUpdate) {
+        // UPDATE MODE: Add new columns to existing rows
+        await handleUpdateMode(currentSheet);
+      } else {
+        // CREATE MODE: Add new rows
+        await handleCreateMode(currentSheet);
       }
-      if (newRows.length === 0) {
-        setIsSaveSuccess(true);
-        return;
-      }
-      // Append only new rows
-      await appendToSheet(newRows, selectedStock.sheetId);
+      
       setIsSaveSuccess(true);
     } catch (err) {
       handleError(err, 'An unexpected error occurred while saving to Google Sheets.');
     } finally {
       setIsSaving(false);
+    }
+  };
+
+  const handleCreateMode = async (currentSheet: string[][]) => {
+    // Determine all unique periods from extractedData
+    const periodSet = new Set<string>();
+    extractedData.forEach(item => {
+      Object.keys(item).forEach(key => {
+        if (key !== 'lineItem') periodSet.add(key);
+      });
+    });
+    const periods = Array.from(periodSet).sort();
+    const headerRow = ['lineItem', ...periods];
+
+    // Write the header row
+    await updateSheetCells([
+      { range: `A1:${String.fromCharCode(65 + periods.length)}1`, values: [headerRow] }
+    ], selectedStock!.sheetId!);
+
+    // Prepare data rows in the same order as the header
+    const newRows: string[][] = extractedData.map(item => {
+      return [item.lineItem, ...periods.map(period => item[period] || '')];
+    });
+
+    if (newRows.length === 0) {
+      return;
+    }
+
+    // Write data rows starting from row 2
+    await updateSheetCells(
+      newRows.map((row, idx) => ({
+        range: `A${idx + 2}:${String.fromCharCode(65 + periods.length)}${idx + 2}`,
+        values: [row]
+      })),
+      selectedStock!.sheetId!
+    );
+  };
+
+  const handleUpdateMode = async (currentSheet: string[][]) => {
+    // For update mode, we add new columns to existing rows in batches
+    const existingPeriods = currentSheet[0]?.slice(1) || [];
+    const existingLineItems = currentSheet.slice(1).map(row => row[0]);
+    
+    // Find new periods that need to be added
+    const newPeriods = new Set<string>();
+    extractedData.forEach(item => {
+      Object.keys(item).forEach(key => {
+        if (key !== 'lineItem' && !existingPeriods.includes(key)) {
+          newPeriods.add(key);
+        }
+      });
+    });
+    
+    if (newPeriods.size === 0) {
+      console.log('No new periods to add');
+      return;
+    }
+    
+    // Sort new periods chronologically
+    const sortedNewPeriods = Array.from(newPeriods).sort();
+    const BATCH_SIZE = 10;
+    for (let i = 0; i < sortedNewPeriods.length; i += BATCH_SIZE) {
+      const batchPeriods = sortedNewPeriods.slice(i, i + BATCH_SIZE);
+      const batchStartColIndex = existingPeriods.length + 1 + i; // +1 for lineItem col, +i for previous batches
+      const batchEndColIndex = batchStartColIndex + batchPeriods.length - 1;
+      const headerRange = `${String.fromCharCode(65 + batchStartColIndex)}1:${String.fromCharCode(65 + batchEndColIndex)}1`;
+      const updates: { range: string; values: string[][] }[] = [];
+      // Add new period headers to the header row for this batch
+      updates.push({
+        range: headerRange,
+        values: [batchPeriods]
+      });
+      // Add values for each existing line item for this batch
+      existingLineItems.forEach((lineItem, rowIndex) => {
+        const extractedItem = extractedData.find(item => item.lineItem === lineItem);
+        if (extractedItem) {
+          const newValues = batchPeriods.map(period => extractedItem[period] || '');
+          if (newValues.some(value => value !== '')) {
+            const dataRowIndex = rowIndex + 2; // +2 because we start from row 2 (after header)
+            const dataRange = `${String.fromCharCode(65 + batchStartColIndex)}${dataRowIndex}:${String.fromCharCode(65 + batchEndColIndex)}${dataRowIndex}`;
+            updates.push({
+              range: dataRange,
+              values: [newValues]
+            });
+          }
+        }
+      });
+      if (updates.length > 0) {
+        await updateSheetCells(updates, selectedStock!.sheetId!);
+      }
     }
   };
 

@@ -182,7 +182,8 @@ export const createStockFolder = async (ticker: string): Promise<StockFolder> =>
       fields: 'id, parents'
     });
 
-    const headerRow = [['Date Extracted', 'Period', 'Line Item', 'Value', 'Source Document']];
+    // Set a placeholder header row: just ['lineItem']
+    const headerRow = [['lineItem']];
     await gapi.client.sheets.spreadsheets.values.update({
         spreadsheetId: newSheetId,
         range: 'Data!A1',
@@ -225,6 +226,34 @@ export const appendToSheet = async (rows: string[][], sheetId: string): Promise<
     console.error("Error appending to sheet:", error);
     const detailedError = parseGoogleApiError(error);
     throw new Error(`Failed to append data to the Google Sheet. Google API Error: ${detailedError}`);
+  }
+};
+
+/**
+ * Updates specific cells in the Data sheet of a Google Sheet.
+ * Used for adding new columns to existing rows.
+ */
+export const updateSheetCells = async (updates: { range: string; values: string[][] }[], sheetId: string): Promise<void> => {
+  if (!sheetId) {
+    throw new Error("Cannot update data: Sheet ID is missing.");
+  }
+  try {
+    const batchUpdateRequest = {
+      valueInputOption: 'USER_ENTERED',
+      data: updates.map(update => ({
+        range: `Data!${update.range}`,
+        values: update.values
+      }))
+    };
+
+    await gapi.client.sheets.spreadsheets.values.batchUpdate({
+      spreadsheetId: sheetId,
+      resource: batchUpdateRequest
+    });
+  } catch (error) {
+    console.error("Error updating sheet cells:", error);
+    const detailedError = parseGoogleApiError(error);
+    throw new Error(`Failed to update data in the Google Sheet. Google API Error: ${detailedError}`);
   }
 };
 

@@ -28,7 +28,7 @@ const fileToGenerativePart = async (file: File): Promise<{ inlineData: { data: s
   };
 };
 
-// Enhanced schema with more specific guidance for value extraction
+// Enhanced schema: only require 'lineItem', allow any period as additional property
 const TABLE_RESPONSE_SCHEMA = {
   type: Type.ARRAY,
   items: {
@@ -37,44 +37,27 @@ const TABLE_RESPONSE_SCHEMA = {
       lineItem: { 
         type: Type.STRING, 
         description: "The name of the financial line item (e.g., 'Revenue', 'Net Income', 'Total Assets', 'Cash and Cash Equivalents')." 
-      },
-      // Example period properties to guide the model
-      "2023": { 
-        type: Type.STRING, 
-        description: "The value for 2023 period (e.g., '$1,234,567', '($123,456)', '1,234,567')" 
-      },
-      "2022": { 
-        type: Type.STRING, 
-        description: "The value for 2022 period (e.g., '$1,000,000', '($100,000)', '1,000,000')" 
-      },
-      "Q1 2023": { 
-        type: Type.STRING, 
-        description: "The value for Q1 2023 period (e.g., '$300,000', '($25,000)', '300,000')" 
-      },
-      "Q2 2023": { 
-        type: Type.STRING, 
-        description: "The value for Q2 2023 period (e.g., '$350,000', '($30,000)', '350,000')" 
       }
     },
     required: ["lineItem"],
     additionalProperties: { 
       type: Type.STRING,
-      description: "Additional period values (e.g., 'Q3 2023', 'Q4 2023', '2021', etc.) with their corresponding financial values"
+      description: "A period (e.g., '2022', 'Q1 2023', etc.) with its corresponding value. Only include periods actually present in the PDFs."
     },
   },
 };
 
 /**
- * Extracts financial data from multiple PDFs, using README context and existing sheet data.
+ * Extracts financial data from multiple PDFs, using existing sheet data for context.
  * @param files Array of PDF files
- * @param readmeDocContent Context from README Google Doc
  * @param existingSheet 2D array of existing sheet data
+ * @param operationType Whether this is a 'create' (new sheet) or 'update' (existing sheet) operation
  * @returns Object with parsed data, raw output, and processing stats
  */
 export const extractFinancialDataFromPdf = async (
   files: File[],
-  readmeDocContent: string,
-  existingSheet: string[][]
+  existingSheet: string[][],
+  operationType: 'create' | 'update' = 'create'
 ): Promise<{
   data: any[];
   rawOutput: string;
@@ -101,50 +84,92 @@ export const extractFinancialDataFromPdf = async (
     console.log("No existing sheet data found");
   }
   
-  console.log("README content length:", readmeDocContent.length);
-  if (readmeDocContent.length > 0) {
-    console.log("README preview:", readmeDocContent.substring(0, 200) + "...");
-  }
+  console.log(`🔧 Using ${operationType.toUpperCase()} mode for Gemini processing`);
 
-  const systemInstruction = `${readmeDocContent}\n\nYou are an expert financial data extraction service. Your task is to analyze financial documents and extract ALL numerical values associated with each line item. You MUST include the actual financial values (numbers, currency symbols, parentheses for negatives) for each period. Do not return empty or null values - if you cannot find a value for a period, omit that period entirely. Preserve exact formatting including currency symbols ($), commas, and parentheses for negative values.`;
+  // Different prompts based on operation type
+  let systemInstruction: string;
+  let prompt: string;
 
-  const prompt = `Analyze the provided financial statement PDFs and extract ALL line items with their corresponding numerical values and periods from any financial tables (Income Statements, Balance Sheets, Cash Flow Statements, etc.).
+  if (operationType === 'create') {
+    systemInstruction = `You are an expert financial data extraction service for creating new financial datasets. Your task is to analyze financial documents and extract ALL numerical values associated with each line item for income statement, balance sheet and cash flow. You MUST include the actual financial values for each period. Your most important characteristics are to be accurate and complete. Take your time and be thorough.`;
+
+    prompt = `CREATE MODE: Analyze the provided financial statement PDFs and extract ALL line items with their corresponding numerical values and periods from any financial tables (Income Statements, Balance Sheets, Cash Flow Statements).
 
 CRITICAL REQUIREMENTS:
-1. Extract the ACTUAL numerical values for each line item and period
-2. Preserve exact formatting (currency symbols, commas, parentheses for negatives)
-3. If quarterly data is present, use period names like 'Q1 2023', 'Q2 2023', etc.
-4. If annual data is present, use year names like '2023', '2022', etc.
-5. Do NOT return empty or null values - only include periods where you find actual data
-6. Look for tables, charts, and any structured financial data
+1. Process ALL Reports: Analyze all provided PDFs to build a comprehensive historical view of the company's financials.
+2. Create Superset of Line Items: Scan all reports to create a standardized "superset" of all unique line items that have ever appeared. Normalize terminology (e.g., "Nettoomsättning" and "Net turnover" both become Net turnover).
+3. Chronological Columns: Arrange the data with the earliest period first and the latest period last. Use years (e.g., 2022, 2023) or quarters (e.g., Q1 2023, Q2 2023) as column headers.
+4. Standardize Numerical Values:
+- Convert all monetary values to a single, consistent unit (e.g., Millions).
+- Represent negative values with a leading minus sign (e.g., -123.4), not parentheses.
+5. Internal Verification (MANDATORY): Before providing the output, you MUST internally verify the data for accuracy across every period:
+- Balance Sheet: Confirm that Total Assets = Total Equity + Total Liabilities.
+- Cash Flow: Confirm that the cash roll-forward is correct (Opening Cash + Cash Flow for Period +/- FX Differences = Closing Cash).
+6. **For each line item, add a property for every period (year or quarter) you find in the PDFs. Do not invent or guess periods—only include periods that are actually present in the PDFs. The output should be a JSON array where each object has a 'lineItem' and one property for each period found.**
 
 Example expected output format:
 [
   {
     "lineItem": "Revenue",
-    "2023": "$1,234,567",
-    "2022": "$1,000,000",
-    "Q1 2023": "$300,000"
+    "2023": "1234567",
+    "2022": "1000000",
+    "Q1 2023": "300000"
   },
   {
     "lineItem": "Net Income",
-    "2023": "($123,456)",
-    "2022": "$50,000",
-    "Q1 2023": "($25,000)"
+    "2023": "123456",
+    "2022": "50000",
+    "Q1 2023": "5000"
   }
 ]
 
-Current sheet data for context (do not duplicate existing data):
+Extract ALL financial data you can find, ensuring each line item has at least one period with a value.`;
+  } else {
+    // UPDATE MODE
+    systemInstruction = `You are an expert financial data extraction service for updating existing financial datasets. Your task is to analyze financial documents and extract ALL numerical values associated with each line item for income statement, balance sheet and cash flow. You MUST include the actual financial values for each period. Your most important characteristics are to be accurate and complete. Take your time and be thorough. First read the existing sheet to understand the current line items, then match new financial values to these existing line items.`;
+
+    prompt = `UPDATE MODE: First, carefully read the existing sheet data to understand the current line items and their structure. Then analyze the provided financial statement PDFs and extract numerical values that match the existing line items.
+
+CRITICAL REQUIREMENTS:
+1. Read Existing Structure: First examine the existing sheet data to understand the current line items and their naming conventions.
+2. Match to Existing Line Items: Only extract data for line items that already exist in the sheet. Do not create new line items.
+3. Add New Columns: Focus on finding new time periods (years or quarters) to add as new columns to existing rows.
+4. Process ALL Reports: Analyze all provided PDFs to find additional time periods for existing line items.
+5. Chronological Columns: Arrange new periods chronologically with the earliest period first and the latest period last. Use years (e.g., 2022, 2023) or quarters (e.g., Q1 2023, Q2 2023) as column headers.
+6. Standardize Numerical Values:
+   - Convert all monetary values to a single, consistent unit (e.g., Millions).
+   - Represent negative values with a leading minus sign (e.g., -123.4), not parentheses.
+7. Internal Verification (MANDATORY): Before providing the output, you MUST internally verify the data for accuracy across every period:
+   - Balance Sheet: Confirm that Total Assets = Total Equity + Total Liabilities.
+   - Cash Flow: Confirm that the cash roll-forward is correct (Opening Cash + Cash Flow for Period +/- FX Differences = Closing Cash).
+8. **For each line item, add a property for every period (year or quarter) you find in the PDFs. Do not invent or guess periods—only include periods that are actually present in the PDFs. The output should be a JSON array where each object has a 'lineItem' and one property for each period found.**
+
+Example expected output format:
+[
+  {
+    "lineItem": "Revenue",
+    "2024": "1500000",
+    "Q1 2024": "400000"
+  },
+  {
+    "lineItem": "Net Income",
+    "2024": "150000",
+    "Q1 2024": "40000"
+  }
+]
+
+Current sheet data for context (match to these existing line items):
 ${existingSheetTable}
 
-Extract ALL financial data you can find, ensuring each line item has at least one period with a value.`;
+Extract ONLY data for existing line items, adding new time periods as columns. Do not create new line items.`;
+  }
 
   try {
-    console.log(`Processing ${files.length} files with Gemini...`);
+    console.log(`Processing ${files.length} files with Gemini in ${operationType.toUpperCase()} mode...`);
     console.log(`Files:`, files.map(f => ({ name: f.name, size: f.size, type: f.type })));
     
     const response = await ai.models.generateContent({
-      model: "gemini-2.5-flash", // Reverting to flash model which might be more reliable for this task
+      model: "gemini-2.5-pro", // Reverting to flash model which might be more reliable for this task
       contents: {
         parts: [
           { text: prompt },
@@ -161,16 +186,29 @@ Extract ALL financial data you can find, ensuring each line item has at least on
     if (!response.text) {
       throw new Error("The model returned an empty response. The document might be unreadable or contain no financial tables.");
     }
-    const jsonText = response.text.trim();
-    console.log("Raw Gemini response:", jsonText);
-    
+    const MAX_JSON_LENGTH = 20000;
+    let jsonText = response.text.trim();
+    if (jsonText.length > MAX_JSON_LENGTH) {
+      // Try to salvage a valid JSON array by trimming to the last closing bracket
+      const lastBracket = jsonText.lastIndexOf(']');
+      if (lastBracket !== -1) {
+        jsonText = jsonText.slice(0, lastBracket + 1);
+      }
+      // Warn the user
+      console.warn(`Gemini output was too long (${response.text.length} chars). Trimmed to ${jsonText.length} chars.`);
+    }
     if (!jsonText) {
       throw new Error("The model returned an empty response. The document might be unreadable or contain no financial tables.");
     }
-
-    const parsedData = JSON.parse(jsonText);
-    console.log("Parsed data:", parsedData);
-
+    let parsedData;
+    try {
+      parsedData = JSON.parse(jsonText);
+    } catch (err) {
+      throw new Error(
+        `Gemini output was too large or malformed. Please try with fewer periods or smaller PDFs. (JSON length: ${jsonText.length})`);
+    }
+    console.log("Raw Gemini response:", jsonText);
+    
     if (!Array.isArray(parsedData)) {
       throw new Error("The model did not return the data in the expected array format.");
     }
