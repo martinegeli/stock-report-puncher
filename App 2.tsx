@@ -1,6 +1,6 @@
 
 import React, { useState, useCallback, useEffect } from 'react';
-import { FinancialDataItem, AppView, GoogleAuthStatus, StockFolder, DriveFile, DataFrequency, InputFolderWithPreview } from './types';
+import { FinancialDataItem, AppView, GoogleAuthStatus, StockFolder, DriveFile, OutputFolder, DataFrequency, InputFolderWithPreview } from './types';
 import { useGoogleApiLoader } from './hooks/useGoogleApiLoader';
 import { processLlamaParseResults } from './services/geminiService';
 import { getSheetData } from './services/googleService';
@@ -11,10 +11,10 @@ import {
   handleSignIn, 
   listStockFolders, 
   createStockFolder,
-  findOrCreateOutputStockFolder,
   appendToSheet,
   updateSheetCells,
   listInputPdfs,
+  listOutputFolders,
   listInputFolders,
   checkExistingOutputFiles,
   downloadPdfFromDrive
@@ -26,6 +26,7 @@ import StockFolderList from './components/StockFolderList';
 import NewStockForm from './components/NewStockForm';
 import UploadView from './components/UploadView';
 import SelectionMenu from './components/SelectionMenu';
+import OutputOverview from './components/OutputOverview';
 import InputOverview from './components/InputOverview';
 import DriveFileSelection from './components/DriveFileSelection';
 import ProcessingProgress from './components/ProcessingProgress';
@@ -51,9 +52,11 @@ const App: React.FC = () => {
   const [error, setError] = useState<string | null>(null);
   const [isSaving, setIsSaving] = useState(false);
   const [isSaveSuccess, setIsSaveSuccess] = useState(false);
+  const [outputFolders, setOutputFolders] = useState<OutputFolder[]>([]);
   const [inputFolders, setInputFolders] = useState<InputFolderWithPreview[]>([]);
   const [inputFiles, setInputFiles] = useState<DriveFile[]>([]);
   const [selectedDriveFiles, setSelectedDriveFiles] = useState<DriveFile[]>([]);
+  const [isLoadingOutputs, setIsLoadingOutputs] = useState(false);
   const [isLoadingInputs, setIsLoadingInputs] = useState(false);
   const [isLoadingInputFiles, setIsLoadingInputFiles] = useState(false);
   const [selectedDataFrequency, setSelectedDataFrequency] = useState<DataFrequency>('annual');
@@ -180,8 +183,8 @@ const App: React.FC = () => {
   }, [files, selectedStock]);
 
   const handleAppendData = async () => {
-    if (!selectedStock || !selectedStock.sheetId || extractedData.length === 0) {
-      setError('Cannot save. Missing data or sheet ID.');
+    if (!selectedStock || !selectedStock.sheetId || extractedData.length === 0 || files.length === 0) {
+      setError('Cannot save. Missing data, files, or sheet ID.');
       return;
     }
     setIsSaving(true);
@@ -328,6 +331,19 @@ const App: React.FC = () => {
      setIsSaveSuccess(false);
   };
 
+  const handleShowOutputOverview = async () => {
+    resetError();
+    setIsLoadingOutputs(true);
+    setView(AppView.OUTPUT_OVERVIEW);
+    try {
+      const folders = await listOutputFolders();
+      setOutputFolders(folders);
+    } catch (err) {
+      handleError(err, "Could not retrieve OUTPUT folders from Google Drive.");
+    } finally {
+      setIsLoadingOutputs(false);
+    }
+  };
 
   const handleShowInputOverview = async (frequency: DataFrequency) => {
     resetError();
@@ -357,6 +373,20 @@ const App: React.FC = () => {
     }
   };
 
+  const handleSelectStockFromOutput = async (stockName: string) => {
+    resetError();
+    setSelectedStockName(stockName);
+    setIsLoadingInputFiles(true);
+    setView(AppView.DRIVE_FILE_SELECTION);
+    try {
+      const files = await listInputPdfs(stockName);
+      setInputFiles(files);
+    } catch (err) {
+      handleError(err, `Could not retrieve PDF files from INPUT/${stockName}.`);
+    } finally {
+      setIsLoadingInputFiles(false);
+    }
+  };
 
   const handleSelectStockFromInput = async (stockName: string) => {
     resetError();
@@ -409,23 +439,22 @@ const App: React.FC = () => {
         )
       );
 
-      // STAGE 2: Check OUTPUT folder for existing sheet
-      console.log('Checking OUTPUT folder for existing sheet...');
-      try {
-        const outputStock = await findOrCreateOutputStockFolder(selectedStockName);
-        let existingSheet: string[][] = [];
-        if (outputStock.sheetId) {
-          existingSheet = await getSheetData(outputStock.sheetId);
-        }
-        
-        const hasExisting = existingSheet.length > 1;
-        setHasExistingSheet(hasExisting);
-        setSelectedStock(outputStock);
-        
-        console.log(`Found OUTPUT sheet with ${existingSheet.length} rows (hasExisting: ${hasExisting})`);
-      } catch (error) {
-        console.error('Error checking OUTPUT folder:', error);
-        setHasExistingSheet(false);
+      // STAGE 2: Check for existing sheet to inform user choices
+      const existingStock = stockFolders.find(folder => 
+        folder.name.toLowerCase() === selectedStockName.toLowerCase()
+      );
+      
+      let existingSheet: string[][] = [];
+      if (existingStock?.sheetId) {
+        existingSheet = await getSheetData(existingStock.sheetId);
+      }
+      
+      const hasExisting = existingSheet.length > 1;
+      setHasExistingSheet(hasExisting);
+      
+      // Set the selected stock early for later use
+      if (existingStock) {
+        setSelectedStock(existingStock);
       }
 
       // STAGE 3: Process with LlamaParse (batch up to 10 files)
@@ -438,28 +467,9 @@ const App: React.FC = () => {
       
       setLlamaParseResults(parseResults);
       
-      // Debug: Log the actual results to see what we got
-      console.log('LlamaParse results received:', parseResults);
-      parseResults.forEach((result, index) => {
-        console.log(`Result ${index + 1}:`, {
-          fileName: result.fileName,
-          status: result.status,
-          hasJsonData: !!result.jsonData,
-          jsonDataType: typeof result.jsonData,
-          jsonDataLength: result.jsonData ? JSON.stringify(result.jsonData).length : 0,
-          error: result.error
-        });
-      });
-      
       // Check if any files failed
       const successfulResults = parseResults.filter(r => r.status === 'completed' && r.jsonData);
-      console.log(`Successful results: ${successfulResults.length} out of ${parseResults.length}`);
-      
       if (successfulResults.length === 0) {
-        console.error('No successful results found. Detailed breakdown:');
-        parseResults.forEach(r => {
-          console.error(`- ${r.fileName}: status=${r.status}, hasJsonData=${!!r.jsonData}, error=${r.error}`);
-        });
         throw new Error('All PDF parsing failed. Please check your files and try again.');
       }
 
@@ -490,32 +500,16 @@ const App: React.FC = () => {
         throw new Error('No successful LlamaParse results to process.');
       }
 
-      // Always use OUTPUT folder approach and auto-determine operation type
-      console.log(`Finding/creating stock folder in OUTPUT for ${selectedStockName}`);
-      const stockToUse = await findOrCreateOutputStockFolder(selectedStockName);
-      setSelectedStock(stockToUse);
-      console.log(`Using OUTPUT stock folder:`, stockToUse);
-
-      // Get existing sheet data to determine operation type
+      // Get existing sheet data (we already have selectedStock set from earlier)
       let existingSheet: string[][] = [];
-      if (stockToUse.sheetId) {
-        existingSheet = await getSheetData(stockToUse.sheetId);
-      }
-
-      // Auto-determine operation type based on existing data
-      const actualOperationType = existingSheet.length > 1 ? 'update' : 'create';
-      console.log(`Auto-determined operation type: ${actualOperationType.toUpperCase()} (sheet has ${existingSheet.length} rows)`);
-      
-      // Override user choice if sheet exists - always UPDATE when data exists
-      if (actualOperationType === 'update' && operationType === 'create') {
-        console.log(`🔄 Overriding CREATE mode to UPDATE mode because sheet contains existing data`);
+      if (selectedStock?.sheetId) {
+        existingSheet = await getSheetData(selectedStock.sheetId);
       }
       
-      console.log(`Processing with Gemini in ${actualOperationType.toUpperCase()} mode`);
-      console.log(`Using sheet: ${stockToUse.sheetId} in OUTPUT/${stockToUse.name}`);
+      console.log(`Processing with Gemini in ${operationType.toUpperCase()} mode`);
       
-      // Process with Gemini using the auto-determined operation type
-      const result = await processLlamaParseResults(successfulResults, existingSheet, actualOperationType);
+      // Process with Gemini using the new LlamaParse workflow
+      const result = await processLlamaParseResults(successfulResults, existingSheet, operationType);
       setExtractedData(result.data);
       setRawGeminiOutput(result.rawOutput);
       setProcessingStats(result.stats);
@@ -607,6 +601,16 @@ const App: React.FC = () => {
           />
         );
 
+      case AppView.OUTPUT_OVERVIEW:
+        return (
+          <OutputOverview
+            outputFolders={outputFolders}
+            isLoading={isLoadingOutputs}
+            onSelectStock={handleSelectStockFromOutput}
+            onBack={handleStartOver}
+            error={error}
+          />
+        );
 
       case AppView.INPUT_OVERVIEW:
         return (

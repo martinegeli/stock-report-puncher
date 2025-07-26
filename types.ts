@@ -1,3 +1,5 @@
+export type DataFrequency = 'annual' | 'quarterly';
+
 export interface FinancialDataItem {
   period: string;
   lineItem: string;
@@ -18,7 +20,7 @@ export enum AppView {
   EXISTING_STOCK_LIST,
   NEW_STOCK_FORM,
   UPLOADING,
-  OUTPUT_OVERVIEW,
+  INPUT_OVERVIEW,
   DRIVE_FILE_SELECTION,
   PROCESSING,
   LLAMAPARSE_REVIEW,
@@ -41,6 +43,36 @@ export interface DriveFile {
 export interface OutputFolder {
   stockName: string;
   files: DriveFile[];
+}
+
+export interface InputFolderWithPreview {
+  stockName: string;
+  inputFiles: DriveFile[];
+  outputFiles: DriveFile[];
+}
+
+// Enhanced progress tracking for sequential pipeline processing
+export interface PipelineProgress {
+  totalFiles: number;
+  currentFileIndex: number;
+  currentFileName?: string;
+  currentStage: 'download' | 'llamaparse' | 'gemini' | 'sheets' | 'completed';
+  fileResults: PipelineFileResult[];
+  overallProgress: number; // 0-100
+  isComplete: boolean;
+  hasErrors: boolean;
+}
+
+export interface PipelineFileResult {
+  id: string;
+  fileName: string;
+  downloadStatus: 'pending' | 'processing' | 'completed' | 'error';
+  llamaParseStatus: 'pending' | 'processing' | 'completed' | 'error';
+  geminiStatus: 'pending' | 'processing' | 'completed' | 'error';
+  sheetsStatus: 'pending' | 'processing' | 'completed' | 'error';
+  error?: string;
+  llamaParseJobId?: string;
+  processingTimeMs?: number;
 }
 
 // Storage interfaces for intermediate data

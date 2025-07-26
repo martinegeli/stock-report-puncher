@@ -6,9 +6,12 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ```bash
 npm run dev      # Start Vite development server (localhost:5173)
+npm run proxy    # Start LlamaParse proxy server (localhost:3001) - REQUIRED for LlamaParse
 npm run build    # Create production build
 npm run preview  # Preview production build locally
 ```
+
+**Important**: You must run BOTH `npm run dev` AND `npm run proxy` in separate terminals for the application to work properly.
 
 ## Architecture Overview
 
@@ -17,9 +20,10 @@ npm run preview  # Preview production build locally
 ### Core Processing Pipeline
 
 1. **PDF Ingestion**: Users select PDFs from Google Drive INPUT folders or upload directly
-2. **LlamaParse Stage**: Batch processing (up to 10 files) converts PDFs to structured JSON
-3. **Gemini Processing**: AI extracts financial data with context awareness (CREATE vs UPDATE mode)
-4. **Google Sheets Export**: Structured financial data is written to organized spreadsheets
+2. **LlamaParse Stage**: Batch processing (up to 10 files) extracts raw table data from PDFs
+3. **User Review Stage**: `LlamaParseReview` component allows users to select CREATE vs UPDATE mode
+4. **Gemini Processing**: AI analyzes table data and creates structured financial datasets with intelligent batching
+5. **Google Sheets Export**: Data written in 2D array format directly compatible with Google Sheets API
 
 ### Service Layer Architecture
 
@@ -30,15 +34,16 @@ npm run preview  # Preview production build locally
 - Comprehensive error parsing for Google API responses
 
 **LlamaParse Service** (`services/llamaParseService.ts`)
-- Batch PDF processing with real-time progress tracking
-- Async job polling with configurable timeouts
+- Generic table extraction from PDFs (no financial interpretation)
+- Batch processing with real-time progress tracking via proxy server
+- Async job polling with configurable timeouts and multiple endpoint fallbacks
 - Individual file error handling with partial success support
 
 **Gemini Service** (`services/geminiService.ts`) 
-- Two processing modes: CREATE (new datasets) and UPDATE (add columns to existing data)
-- Context-aware processing using existing sheet data
-- Schema-validated JSON output with financial data structures
-- Legacy PDF processing and new LlamaParse integration
+- **Intelligent Batching Strategy**: CREATE mode uses single file, UPDATE mode processes one-at-a-time
+- **Financial Intelligence Layer**: Analyzes raw table data to identify and extract financial statements
+- **Schema-validated Output**: Returns Google Sheets-ready 2D array format (`{headers: [], rows: []}`)
+- **Context-aware Processing**: Reads existing sheet structure for UPDATE mode matching
 
 **Storage Service** (`services/storageService.ts`)
 - Session-based intermediate data storage between parsing stages
@@ -70,9 +75,10 @@ See `GOOGLE_SETUP_GUIDE.md` for detailed Google Cloud Console setup including AP
 **Centralized State**: App.tsx manages all application state using React hooks with view-based routing through AppView enum.
 
 **Key State Flow**:
-- `view` controls which component renders (AUTHENTICATING → SELECTION_MENU → PROCESSING → SUCCESS)
+- `view` controls which component renders (AUTHENTICATING → SELECTION_MENU → PROCESSING → **LLAMAPARSE_REVIEW** → SUCCESS)
 - `currentProcessingStage` tracks pipeline progress ('llamaparse' | 'gemini' | 'saving')
-- `llamaParseResults` stores intermediate JSON data between processing stages
+- `llamaParseResults` stores raw table data between LlamaParse and Gemini stages
+- **User control point**: `LlamaParseReview` allows users to choose processing mode before Gemini
 - Processing progress flows through real-time updates via callback functions
 
 ### Google Drive Folder Structure
@@ -96,7 +102,7 @@ Main Drive Folder/
 **Processing Flow Components**:
 - `SelectionMenu`: Three-path entry (New Upload/Update Existing/Process from Drive)
 - `ProcessingProgress`: Multi-stage visualization with file-by-file tracking
-- `LlamaParseReview`: Intermediate review of parsed JSON data
+- `LlamaParseReview`: **Critical user decision point** - review parsed files and choose CREATE vs UPDATE mode
 - `DataTable`: Results display with Google Sheets integration and save functionality
 
 **Data Handling**:
@@ -106,17 +112,19 @@ Main Drive Folder/
 
 ### Financial Data Processing Logic
 
-**CREATE Mode**: Build comprehensive financial dataset from scratch
-- Extracts ALL line items from financial statements (Income/Balance/Cash Flow)
-- Creates standardized "superset" of unique line items with normalized terminology
-- Arranges periods chronologically (earliest to latest)
-- Performs internal verification (Balance Sheet equation, Cash Flow reconciliation)
+**CREATE Mode**: Establish comprehensive financial structure (SINGLE FILE ONLY)
+- **Uses only the first file** to establish clean line item structure
+- **Analyzes raw table data** from LlamaParse to identify financial statements
+- **Extracts ALL line items** with standardized terminology and chronological arrangement
+- **Returns Google Sheets format**: `{headers: ["Line Item", "2022", "2023"], rows: [["Revenue", "123", "456"]]}`
+- **Warns if multiple files provided**: Recommends using UPDATE mode for additional files
 
-**UPDATE Mode**: Add new time periods to existing sheet structure  
-- Only extracts data for line items already present in sheet
-- Focuses on finding NEW time periods as additional columns
-- Matches existing naming conventions and units exactly
-- Maintains data consistency with current sheet structure
+**UPDATE Mode**: Add new time periods sequentially (ONE-AT-A-TIME PROCESSING)
+- **Reads existing sheet structure** automatically from Google Sheets
+- **Processes files sequentially** to avoid Gemini API limits
+- **Intelligent line item matching** handles naming variations
+- **Adds only new periods** as additional columns to existing structure
+- **Maintains data consistency** with existing naming conventions and units
 
 ### Error Handling Strategy
 
