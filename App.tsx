@@ -1,16 +1,21 @@
 
 import React, { useState, useCallback, useEffect } from 'react';
-import { FinancialDataItem, AppView, GoogleAuthStatus, StockFolder } from './types';
+import { FinancialDataItem, AppView, GoogleAuthStatus, StockFolder, DriveFile, OutputFolder } from './types';
 import { useGoogleApiLoader } from './hooks/useGoogleApiLoader';
-import { extractFinancialDataFromPdf } from './services/geminiService';
+import { extractFinancialDataFromPdf, processLlamaParseResults } from './services/geminiService';
 import { getSheetData } from './services/googleService';
+import { processPdfBatch, BatchProcessingProgress, LlamaParseResult } from './services/llamaParseService';
+import { addProcessedFile } from './services/processedFilesService';
 import { 
   initGoogleClient, 
   handleSignIn, 
   listStockFolders, 
   createStockFolder,
   appendToSheet,
-  updateSheetCells
+  updateSheetCells,
+  listInputPdfs,
+  listOutputFolders,
+  downloadPdfFromDrive
 } from './services/googleService';
 import { ResetIcon } from './components/Icons';
 import Loader from './components/Loader';
@@ -19,6 +24,10 @@ import StockFolderList from './components/StockFolderList';
 import NewStockForm from './components/NewStockForm';
 import UploadView from './components/UploadView';
 import SelectionMenu from './components/SelectionMenu';
+import OutputOverview from './components/OutputOverview';
+import DriveFileSelection from './components/DriveFileSelection';
+import ProcessingProgress from './components/ProcessingProgress';
+import LlamaParseReview from './components/LlamaParseReview';
 import { GoogleIcon, AlertTriangleIcon } from './components/Icons';
 
 
@@ -40,6 +49,16 @@ const App: React.FC = () => {
   const [error, setError] = useState<string | null>(null);
   const [isSaving, setIsSaving] = useState(false);
   const [isSaveSuccess, setIsSaveSuccess] = useState(false);
+  const [outputFolders, setOutputFolders] = useState<OutputFolder[]>([]);
+  const [inputFiles, setInputFiles] = useState<DriveFile[]>([]);
+  const [selectedDriveFiles, setSelectedDriveFiles] = useState<DriveFile[]>([]);
+  const [isLoadingOutputs, setIsLoadingOutputs] = useState(false);
+  const [isLoadingInputFiles, setIsLoadingInputFiles] = useState(false);
+  const [selectedStockName, setSelectedStockName] = useState<string>('');
+  const [llamaParseProgress, setLlamaParseProgress] = useState<BatchProcessingProgress | null>(null);
+  const [llamaParseResults, setLlamaParseResults] = useState<LlamaParseResult[]>([]);
+  const [currentProcessingStage, setCurrentProcessingStage] = useState<'llamaparse' | 'gemini' | 'saving'>('llamaparse');
+  const [hasExistingSheet, setHasExistingSheet] = useState<boolean>(false);
   
   const { isReady: areGoogleApisReady, isLoading: areGoogleApisLoading, error: googleApiLoaderError } = useGoogleApiLoader();
 
@@ -273,6 +292,14 @@ const App: React.FC = () => {
     setProcessingStats(null);
     setError(null);
     setIsSaveSuccess(false);
+    setOutputFolders([]);
+    setInputFiles([]);
+    setSelectedDriveFiles([]);
+    setSelectedStockName('');
+    setLlamaParseProgress(null);
+    setLlamaParseResults([]);
+    setCurrentProcessingStage('llamaparse');
+    setHasExistingSheet(false);
   };
 
   const handleResetForNewUpload = () => {
@@ -284,6 +311,169 @@ const App: React.FC = () => {
      setError(null);
      setIsSaveSuccess(false);
   };
+
+  const handleShowOutputOverview = async () => {
+    resetError();
+    setIsLoadingOutputs(true);
+    setView(AppView.OUTPUT_OVERVIEW);
+    try {
+      const folders = await listOutputFolders();
+      setOutputFolders(folders);
+    } catch (err) {
+      handleError(err, "Could not retrieve OUTPUT folders from Google Drive.");
+    } finally {
+      setIsLoadingOutputs(false);
+    }
+  };
+
+  const handleSelectStockFromOutput = async (stockName: string) => {
+    resetError();
+    setSelectedStockName(stockName);
+    setIsLoadingInputFiles(true);
+    setView(AppView.DRIVE_FILE_SELECTION);
+    try {
+      const files = await listInputPdfs(stockName);
+      setInputFiles(files);
+    } catch (err) {
+      handleError(err, `Could not retrieve PDF files from INPUT/${stockName}.`);
+    } finally {
+      setIsLoadingInputFiles(false);
+    }
+  };
+
+  const handleToggleDriveFile = (file: DriveFile) => {
+    setSelectedDriveFiles(prev => {
+      const exists = prev.find(f => f.id === file.id);
+      if (exists) {
+        return prev.filter(f => f.id !== file.id);
+      } else {
+        return [...prev, file];
+      }
+    });
+  };
+
+  const handleProcessDriveFiles = useCallback(async () => {
+    if (selectedDriveFiles.length === 0 || !selectedStockName) {
+      setError('No files selected or stock name missing.');
+      return;
+    }
+
+    setView(AppView.PROCESSING);
+    resetError();
+    setExtractedData([]);
+    setRawGeminiOutput('');
+    setProcessingStats(null);
+    setLlamaParseProgress(null);
+    setLlamaParseResults([]);
+    setCurrentProcessingStage('llamaparse');
+    setHasExistingSheet(false);
+
+    try {
+      // STAGE 1: Download PDFs from Google Drive
+      console.log('Downloading PDFs from Google Drive...');
+      const downloadedFiles = await Promise.all(
+        selectedDriveFiles.map(driveFile => 
+          downloadPdfFromDrive(driveFile.id, driveFile.name)
+        )
+      );
+
+      // STAGE 2: Check for existing sheet to inform user choices
+      const existingStock = stockFolders.find(folder => 
+        folder.name.toLowerCase() === selectedStockName.toLowerCase()
+      );
+      
+      let existingSheet: string[][] = [];
+      if (existingStock?.sheetId) {
+        existingSheet = await getSheetData(existingStock.sheetId);
+      }
+      
+      const hasExisting = existingSheet.length > 1;
+      setHasExistingSheet(hasExisting);
+      
+      // Set the selected stock early for later use
+      if (existingStock) {
+        setSelectedStock(existingStock);
+      }
+
+      // STAGE 3: Process with LlamaParse (batch up to 10 files)
+      console.log('Processing PDFs with LlamaParse...');
+      setCurrentProcessingStage('llamaparse');
+      
+      const parseResults = await processPdfBatch(downloadedFiles, (progress) => {
+        setLlamaParseProgress(progress);
+      });
+      
+      setLlamaParseResults(parseResults);
+      
+      // Check if any files failed
+      const successfulResults = parseResults.filter(r => r.status === 'completed' && r.jsonData);
+      if (successfulResults.length === 0) {
+        throw new Error('All PDF parsing failed. Please check your files and try again.');
+      }
+
+      if (successfulResults.length < parseResults.length) {
+        console.warn(`${parseResults.length - successfulResults.length} files failed to parse`);
+      }
+
+      // PAUSE HERE: Go to review stage instead of continuing automatically
+      console.log('LlamaParse completed. Moving to review stage...');
+      setView(AppView.LLAMAPARSE_REVIEW);
+    } catch (err) {
+      const errorMessage = err instanceof Error ? err.message : 'An unknown error occurred.';
+      setError(`Failed to process the documents. ${errorMessage}`);
+      setView(AppView.ERROR);
+    }
+  }, [selectedDriveFiles, selectedStockName, stockFolders]);
+
+  const handleProceedToGemini = useCallback(async (operationType: 'create' | 'update') => {
+    setView(AppView.PROCESSING);
+    setCurrentProcessingStage('gemini');
+    resetError();
+
+    try {
+      // Get successful results from LlamaParse
+      const successfulResults = llamaParseResults.filter(r => r.status === 'completed' && r.jsonData);
+      
+      if (successfulResults.length === 0) {
+        throw new Error('No successful LlamaParse results to process.');
+      }
+
+      // Get existing sheet data (we already have selectedStock set from earlier)
+      let existingSheet: string[][] = [];
+      if (selectedStock?.sheetId) {
+        existingSheet = await getSheetData(selectedStock.sheetId);
+      }
+      
+      console.log(`Processing with Gemini in ${operationType.toUpperCase()} mode`);
+      
+      // Process with Gemini using the new LlamaParse workflow
+      const result = await processLlamaParseResults(successfulResults, existingSheet, operationType);
+      setExtractedData(result.data);
+      setRawGeminiOutput(result.rawOutput);
+      setProcessingStats(result.stats);
+
+      // Track processed files
+      console.log('Tracking processed files...');
+      successfulResults.forEach(result => {
+        const driveFile = selectedDriveFiles.find(f => f.name === result.fileName);
+        if (driveFile) {
+          addProcessedFile({
+            fileId: driveFile.id,
+            fileName: result.fileName,
+            stockName: selectedStockName,
+            status: 'processed',
+            llamaParseJobId: result.id
+          });
+        }
+      });
+      
+      setView(AppView.SUCCESS);
+    } catch (err) {
+      const errorMessage = err instanceof Error ? err.message : 'An unknown error occurred.';
+      setError(`Failed to process with Gemini. ${errorMessage}`);
+      setView(AppView.ERROR);
+    }
+  }, [llamaParseResults, selectedStock, selectedDriveFiles, selectedStockName]);
 
   const renderContent = () => {
     // Centralized loading state while Google scripts are being fetched.
@@ -321,6 +511,7 @@ const App: React.FC = () => {
           <SelectionMenu
             onAddNew={() => setView(AppView.NEW_STOCK_FORM)}
             onUpdateExisting={handleShowExistingStocks}
+            onProcessFromDrive={handleShowOutputOverview}
           />
         );
       
@@ -347,6 +538,31 @@ const App: React.FC = () => {
             error={error}
           />
         );
+
+      case AppView.OUTPUT_OVERVIEW:
+        return (
+          <OutputOverview
+            outputFolders={outputFolders}
+            isLoading={isLoadingOutputs}
+            onSelectStock={handleSelectStockFromOutput}
+            onBack={handleStartOver}
+            error={error}
+          />
+        );
+
+      case AppView.DRIVE_FILE_SELECTION:
+        return (
+          <DriveFileSelection
+            stockName={selectedStockName}
+            inputFiles={inputFiles}
+            isLoadingFiles={isLoadingInputFiles}
+            selectedFiles={selectedDriveFiles}
+            onFileToggle={handleToggleDriveFile}
+            onProcess={handleProcessDriveFiles}
+            onBack={handleShowOutputOverview}
+            error={error}
+          />
+        );
       
       case AppView.UPLOADING:
         if (!selectedStock) {
@@ -365,12 +581,41 @@ const App: React.FC = () => {
         );
       
       case AppView.PROCESSING:
+        if (llamaParseProgress) {
+          return (
+            <ProcessingProgress
+              progress={llamaParseProgress}
+              currentStage={currentProcessingStage}
+              onCancel={() => {
+                console.log('Processing cancelled by user');
+                setView(AppView.DRIVE_FILE_SELECTION);
+              }}
+            />
+          );
+        } else {
+          return (
+            <div className="text-center">
+              <Loader />
+              <p className="text-lg font-medium text-slate-600 mt-4">
+                {selectedStock?.name ? 
+                  `Analyzing your documents for ${selectedStock.name}...` :
+                  `Analyzing your documents for ${selectedStockName}...`
+                }
+              </p>
+              <p className="text-sm text-slate-500">This may take a moment. We're processing your PDFs with LlamaParse...</p>
+            </div>
+          );
+        }
+
+      case AppView.LLAMAPARSE_REVIEW:
         return (
-          <div className="text-center">
-            <Loader />
-            <p className="text-lg font-medium text-slate-600 mt-4">Analyzing your document for {selectedStock?.name}...</p>
-            <p className="text-sm text-slate-500">This may take a moment. The AI is meticulously checking every number.</p>
-          </div>
+          <LlamaParseReview
+            results={llamaParseResults}
+            stockName={selectedStockName}
+            hasExistingSheet={hasExistingSheet}
+            onProceedToGemini={handleProceedToGemini}
+            onBack={() => setView(AppView.DRIVE_FILE_SELECTION)}
+          />
         );
       
       case AppView.SUCCESS:

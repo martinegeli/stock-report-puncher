@@ -314,3 +314,117 @@ export const getReadmeDocContent = async (): Promise<string> => {
     return '';
   }
 };
+
+// --- GOOGLE DRIVE: INPUT/OUTPUT FOLDER OPERATIONS ---
+
+/**
+ * Lists all PDF files in the INPUT/{stockName} folder
+ */
+export const listInputPdfs = async (stockName: string): Promise<{id: string, name: string}[]> => {
+  try {
+    // First find the INPUT folder
+    const inputFolderResponse = await gapi.client.drive.files.list({
+      q: `name='INPUT' and '${SHARED_GOOGLE_DRIVE_FOLDER_ID}' in parents and mimeType='application/vnd.google-apps.folder' and trashed=false`,
+      fields: 'files(id)',
+      pageSize: 1
+    });
+    
+    const inputFolder = inputFolderResponse.result.files?.[0];
+    if (!inputFolder) {
+      throw new Error('INPUT folder not found in Google Drive');
+    }
+
+    // Find the stock-specific folder within INPUT
+    const stockFolderResponse = await gapi.client.drive.files.list({
+      q: `name='${stockName}' and '${inputFolder.id}' in parents and mimeType='application/vnd.google-apps.folder' and trashed=false`,
+      fields: 'files(id)',
+      pageSize: 1
+    });
+
+    const stockFolder = stockFolderResponse.result.files?.[0];
+    if (!stockFolder) {
+      throw new Error(`INPUT/${stockName} folder not found in Google Drive`);
+    }
+
+    // List all PDF files in the stock folder
+    const pdfResponse = await gapi.client.drive.files.list({
+      q: `'${stockFolder.id}' in parents and mimeType='application/pdf' and trashed=false`,
+      fields: 'files(id, name)',
+      pageSize: 100
+    });
+
+    return pdfResponse.result.files || [];
+  } catch (error) {
+    console.error(`Error listing INPUT PDFs for ${stockName}:`, error);
+    const detailedError = parseGoogleApiError(error);
+    throw new Error(`Could not list PDF files from INPUT/${stockName}. ${detailedError}`);
+  }
+};
+
+/**
+ * Lists all files in OUTPUT folders to show existing processed data
+ */
+export const listOutputFolders = async (): Promise<{stockName: string, files: {id: string, name: string}[]}[]> => {
+  try {
+    // First find the OUTPUT folder
+    const outputFolderResponse = await gapi.client.drive.files.list({
+      q: `name='OUTPUT' and '${SHARED_GOOGLE_DRIVE_FOLDER_ID}' in parents and mimeType='application/vnd.google-apps.folder' and trashed=false`,
+      fields: 'files(id)',
+      pageSize: 1
+    });
+    
+    const outputFolder = outputFolderResponse.result.files?.[0];
+    if (!outputFolder) {
+      return []; // No OUTPUT folder exists yet
+    }
+
+    // List all stock folders within OUTPUT
+    const stockFoldersResponse = await gapi.client.drive.files.list({
+      q: `'${outputFolder.id}' in parents and mimeType='application/vnd.google-apps.folder' and trashed=false`,
+      fields: 'files(id, name)',
+      pageSize: 100
+    });
+
+    const stockFolders = stockFoldersResponse.result.files || [];
+    
+    // For each stock folder, list its files
+    const result = await Promise.all(stockFolders.map(async (folder: any) => {
+      const filesResponse = await gapi.client.drive.files.list({
+        q: `'${folder.id}' in parents and trashed=false`,
+        fields: 'files(id, name)',
+        pageSize: 100
+      });
+
+      return {
+        stockName: folder.name,
+        files: filesResponse.result.files || []
+      };
+    }));
+
+    return result.sort((a, b) => a.stockName.localeCompare(b.stockName));
+  } catch (error) {
+    console.error('Error listing OUTPUT folders:', error);
+    const detailedError = parseGoogleApiError(error);
+    throw new Error(`Could not list OUTPUT folders. ${detailedError}`);
+  }
+};
+
+/**
+ * Downloads a PDF file from Google Drive and converts it to a File object
+ */
+export const downloadPdfFromDrive = async (fileId: string, fileName: string): Promise<File> => {
+  try {
+    const response = await gapi.client.drive.files.get({
+      fileId: fileId,
+      alt: 'media'
+    });
+
+    // Convert the response to a blob
+    const blob = new Blob([response.body], { type: 'application/pdf' });
+    return new File([blob], fileName, { type: 'application/pdf' });
+  } catch (error) {
+    console.error(`Error downloading PDF ${fileName}:`, error);
+    const detailedError = parseGoogleApiError(error);
+    throw new Error(`Could not download PDF file. ${detailedError}`);
+  }
+};

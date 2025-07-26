@@ -30,6 +30,26 @@ export const GOOGLE_CLIENT_ID = import.meta.env.VITE_GOOGLE_CLIENT_ID || "YOUR_G
  */
 export const SHARED_GOOGLE_DRIVE_FOLDER_ID = import.meta.env.VITE_GOOGLE_DRIVE_FOLDER_ID || "YOUR_GOOGLE_DRIVE_FOLDER_ID_HERE";
 
+/**
+ * Your LlamaParse API Key.
+ * Used for parsing PDF documents into structured JSON.
+ * Get this from: https://cloud.llamaindex.ai/
+ * @example "llx-..."
+ */
+export const LLAMAPARSE_API_KEY = import.meta.env.VITE_LLAMAPARSE_API_KEY || "YOUR_LLAMAPARSE_API_KEY_HERE";
+
+/**
+ * Maximum number of PDFs to process in a batch with LlamaParse.
+ * Default: 10 (recommended limit)
+ */
+export const LLAMAPARSE_BATCH_SIZE = parseInt(import.meta.env.VITE_LLAMAPARSE_BATCH_SIZE || "10", 10);
+
+/**
+ * Processing timeout in milliseconds.
+ * Default: 5 minutes (300000ms)
+ */
+export const PROCESSING_TIMEOUT = parseInt(import.meta.env.VITE_PROCESSING_TIMEOUT || "300000", 10);
+
 // Validation function to check if credentials are properly set
 export const validateConfig = () => {
     const missing = [];
@@ -42,8 +62,11 @@ export const validateConfig = () => {
     if (!SHARED_GOOGLE_DRIVE_FOLDER_ID || SHARED_GOOGLE_DRIVE_FOLDER_ID === "YOUR_GOOGLE_DRIVE_FOLDER_ID_HERE") {
         missing.push("SHARED_GOOGLE_DRIVE_FOLDER_ID");
     }
+    if (!LLAMAPARSE_API_KEY || LLAMAPARSE_API_KEY === "YOUR_LLAMAPARSE_API_KEY_HERE") {
+        missing.push("LLAMAPARSE_API_KEY");
+    }
     
     if (missing.length > 0) {
-        throw new Error(`Missing or placeholder credentials: ${missing.join(", ")}. Please update config.ts with your actual Google credentials.`);
+        throw new Error(`Missing or placeholder credentials: ${missing.join(", ")}. Please update your .env file with actual API credentials.`);
     }
 };

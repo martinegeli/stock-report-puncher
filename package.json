@@ -5,13 +5,23 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
+    "proxy": "node proxy-server.cjs",
     "build": "vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "mcp:install": "npm install -g @llamaindex/mcp-server-llamaparse @modelcontextprotocol/server-google-drive @modelcontextprotocol/server-google-sheets",
+    "mcp:llamaparse": "npx @llamaindex/mcp-server-llamaparse",
+    "mcp:google-drive": "npx @modelcontextprotocol/server-google-drive",
+    "mcp:google-sheets": "npx @modelcontextprotocol/server-google-sheets"
   },
   "dependencies": {
+    "@google/genai": "^1.9.0",
+    "cors": "^2.8.5",
+    "express": "^5.1.0",
+    "form-data": "^4.0.4",
+    "multer": "^2.0.2",
+    "node-fetch": "^3.3.2",
     "react": "^19.1.0",
-    "react-dom": "^19.1.0",
-    "@google/genai": "^1.9.0"
+    "react-dom": "^19.1.0"
   },
   "devDependencies": {
     "@types/node": "^22.14.0",

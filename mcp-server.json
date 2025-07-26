@@ -1,0 +1,30 @@
+{
+  "mcpServers": {
+    "llamaparse": {
+      "command": "npx",
+      "args": ["@llamaindex/mcp-server-llamaparse"],
+      "env": {
+        "LLAMAINDEX_API_KEY": "${VITE_LLAMAPARSE_API_KEY}"
+      }
+    },
+    "google-drive": {
+      "command": "npx",
+      "args": ["@modelcontextprotocol/server-google-drive"],
+      "env": {
+        "GOOGLE_API_KEY": "${VITE_GOOGLE_API_KEY}",
+        "GOOGLE_CLIENT_ID": "${VITE_GOOGLE_CLIENT_ID}",
+        "GOOGLE_CLIENT_SECRET": "${GOOGLE_CLIENT_SECRET}",
+        "GOOGLE_FOLDER_ID": "${VITE_GOOGLE_DRIVE_FOLDER_ID}"
+      }
+    },
+    "google-sheets": {
+      "command": "npx",
+      "args": ["@modelcontextprotocol/server-google-sheets"],
+      "env": {
+        "GOOGLE_API_KEY": "${VITE_GOOGLE_API_KEY}",
+        "GOOGLE_CLIENT_ID": "${VITE_GOOGLE_CLIENT_ID}",
+        "GOOGLE_CLIENT_SECRET": "${GOOGLE_CLIENT_SECRET}"
+      }
+    }
+  }
+}
