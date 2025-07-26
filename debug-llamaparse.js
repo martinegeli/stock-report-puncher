@@ -2,7 +2,7 @@
 // Run this in the browser console to test the API call
 
 async function debugLlamaParse() {
-  const LLAMAPARSE_API_KEY = 'llx-zFyi3CQA7vRbCIJWh93QlnOyyYCydAEHCavvRpJatfW0L310';
+  const LLAMAPARSE_API_KEY = 'llama-api-key';
   const LLAMAPARSE_BASE_URL = 'https://api.cloud.llamaindex.ai/api/parsing';
   
   console.log('Testing LlamaParse API connection...');
